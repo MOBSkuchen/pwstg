@@ -31,6 +31,7 @@ struct App {
     password: String,
     viewing: Vec<u32>,
     pw_file: String,
+    changed: bool,
 }
 
 fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -46,6 +47,7 @@ impl App {
         let pw_file = ".pw_stg".to_string();
         let pw_man = PasswordManager::init(&pw_file);
         Self {
+            changed: false,
             pw_file,
             viewing: Vec::new(),
             passwords: pw_man.decrypt_all(password.clone()),
@@ -127,9 +129,12 @@ impl App {
         ]).areas(area);
 
         let [left, right] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(main);
-
-        frame.render_widget(Paragraph::new("Ratatui Todo List Example").bold().centered(), header_area);
-        frame.render_widget(Paragraph::new("Use ↓↑ to move, ← to unselect, → to change status, g/G to go top/bottom.").centered(), footer_area);
+        let mut text = format!("pwstg - Password Storage by MOBSkuchen\nPasswords are at: {}", self.pw_file);
+        if self.changed {
+            text = format!("{text} <unsaved changes>");
+        }
+        frame.render_widget(Paragraph::new(text).bold().centered(), header_area);
+        frame.render_widget(Paragraph::new("Use ↓↑ to move, v to view / hide, e to edit, r to remove, s to save, q to quit.").centered(), footer_area);
 
         let block = Block::new()
             .title(Line::raw("Passwords").left_aligned())
@@ -168,6 +173,8 @@ impl App {
     }
 
     fn add_password(&mut self) {
+        self.changed = true;
+        
         let name = self.name_data.clone();
         let value = self.value_data.clone();
 
@@ -190,7 +197,7 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.select_previous(),
             KeyCode::Char('s') => {
                 self.password_manager.to_file(&self.pw_file);
-                self.should_exit = true
+                self.changed = false;
             },
             KeyCode::Char('v') if self.selection.is_some() => {
                 let i = self.selection.unwrap();
@@ -209,11 +216,13 @@ impl App {
 
                 self.password_manager.passwords.remove(&self.name_data);
                 self.passwords.swap_remove_index(self.selection.unwrap() as usize);
+                self.changed = true;
             },
             KeyCode::Char('r') if self.selection.is_some() => {
                 let val = self.passwords.get_index(self.selection.unwrap() as usize).unwrap();
                 self.password_manager.passwords.remove(val.0);
                 self.passwords.swap_remove_index(self.selection.unwrap() as usize);
+                self.changed = true;
             },
             _ => {}
         }
