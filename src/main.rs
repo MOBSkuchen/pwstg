@@ -14,7 +14,23 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{symbols, DefaultTerminal, Frame};
 use arboard::Clipboard;
+use clap::Arg;
+use clap::ValueHint::AnyPath;
 use rpassword::read_password;
+use crate::Error::{InaccessibleClipboard, Other, RemovalFailed, WrongPassword};
+
+pub const NAME: &str = env!("CARGO_PKG_NAME");
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
+
+#[derive(Debug)]
+enum Error {
+    RemovalFailed,
+    InaccessibleClipboard,
+    WrongPassword,
+    StorageFileNotFound,
+    Other(io::Error),
+}
 
 fn find_storage_location() -> String {
     let mut base_dir = dirs::data_local_dir().expect("Failed to find local app data path");
@@ -40,21 +56,37 @@ enum ErrorDisplay {
     DuplicateName,
 }
 
+struct PasswordContext {
+    password_manager: PasswordStorageHolder,
+    passwords: IndexMap<String, String>,
+    password: String,
+}
+
+impl PasswordContext {
+    pub fn new(password_manager: PasswordStorageHolder, passwords: IndexMap<String, String>, password: String) -> Self {
+        Self { password_manager, passwords, password }
+    }
+    
+    pub fn auto(password: String, pw_file: String) -> Result<Self, Error> {
+        let pw_man = PasswordStorageHolder::init(&pw_file);
+        let passwords = pw_man.decrypt_all(password.clone())?;
+        Ok(Self::new(pw_man, passwords, password))
+    }
+}
+
 struct App {
     enter_mode: EnterMode,
     name_data: String,
     value_data: String,
     should_exit: bool,
-    password_manager: PasswordManager,
-    passwords: IndexMap<String, String>,
     selection: Option<u32>,
-    password: String,
     viewing: Vec<u32>,
     pw_file: String,
     changed: bool,
     error: ErrorDisplay,
     show_pwd: bool,
-    ctx_edit: bool
+    ctx_edit: bool,
+    pw_context: PasswordContext,
 }
 
 fn popup_area(area: Rect) -> Rect {
@@ -93,9 +125,8 @@ fn selection_window<T>(
 
 
 impl App {
-    fn new(password: String) -> Result<Self, bool> {
+    fn new(pw_context: PasswordContext) -> Result<Self, bool> {
         let pw_file = find_storage_location();
-        let pw_man = PasswordManager::init(&pw_file);
         Ok(Self {
             ctx_edit: false,
             show_pwd: false,
@@ -103,18 +134,16 @@ impl App {
             changed: false,
             pw_file,
             viewing: Vec::new(),
-            passwords: pw_man.decrypt_all(password.clone())?,
-            password,
+            pw_context,
             selection: None,
             value_data: String::new(),
             name_data: String::new(),
             enter_mode: EnterMode::None,
             should_exit: false,
-            password_manager: pw_man,
         })
     }
 
-    fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+    fn run(mut self, mut terminal: DefaultTerminal) -> std::io::Result<()> {
         while !self.should_exit {
             match self.enter_mode {
                 EnterMode::None => {
@@ -208,16 +237,16 @@ impl App {
 
         let i = self.selection.unwrap_or(0) as usize;
         let x = left.height as usize;
-        
+
         let block = Block::new()
             .title(Line::raw("Passwords").left_aligned())
             .borders(Borders::BOTTOM)
             .border_set(symbols::border::ROUNDED);
 
         frame.render_widget(block, top);
-        
-        let pw_it_1 = selection_window(self.passwords.keys(), i, x);
-        let pw_it_2 = selection_window(self.passwords.iter(), i, x);
+
+        let pw_it_1 = selection_window(self.pw_context.passwords.keys(), i, x);
+        let pw_it_2 = selection_window(self.pw_context.passwords.iter(), i, x);
 
         let items: Vec<ListItem> = pw_it_1.iter()
             .enumerate()
@@ -256,8 +285,8 @@ impl App {
         self.name_data = String::new();
         self.value_data = String::new();
 
-        self.password_manager.add_password(self.password.clone(), name.clone(), &value);
-        self.passwords.insert(name, value);
+        self.pw_context.password_manager.add_password(self.pw_context.password.clone(), name.clone(), &value);
+        self.pw_context.passwords.insert(name, value);
     }
 
     fn handle_key_em_none(&mut self, key: KeyEvent) {
@@ -273,7 +302,7 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_previous(),
             KeyCode::Char('s') => {
-                self.password_manager.to_file(&self.pw_file);
+                self.pw_context.password_manager.to_file(&self.pw_file);
                 self.changed = false;
             },
             KeyCode::Tab => {
@@ -289,24 +318,24 @@ impl App {
             },
             KeyCode::Char('e') if self.selection.is_some() => {
                 self.ctx_edit = true;
-                let val = self.passwords.get_index(self.selection.unwrap() as usize).unwrap();
+                let val = self.pw_context.passwords.get_index(self.selection.unwrap() as usize).unwrap();
 
                 self.name_data = val.0.to_string();
                 self.value_data = val.1.to_string();
                 self.enter_mode = EnterMode::Name;
 
-                self.password_manager.passwords.remove(&self.name_data);
-                self.passwords.swap_remove_index(self.selection.unwrap() as usize);
+                self.pw_context.password_manager.passwords.remove(&self.name_data);
+                self.pw_context.passwords.swap_remove_index(self.selection.unwrap() as usize);
                 self.changed = true;
             },
             KeyCode::Char('c') if self.selection.is_some() => {
-                let val = self.passwords.get_index(self.selection.unwrap() as usize).unwrap();
+                let val = self.pw_context.passwords.get_index(self.selection.unwrap() as usize).unwrap();
                 copy_to_clipboard(val.1).expect("Failed to copy to clipboard");
             },
             KeyCode::Char('r') if self.selection.is_some() => {
-                let val = self.passwords.get_index(self.selection.unwrap() as usize).unwrap();
-                self.password_manager.passwords.remove(val.0);
-                self.passwords.swap_remove_index(self.selection.unwrap() as usize);
+                let val = self.pw_context.passwords.get_index(self.selection.unwrap() as usize).unwrap();
+                self.pw_context.password_manager.passwords.remove(val.0);
+                self.pw_context.passwords.swap_remove_index(self.selection.unwrap() as usize);
                 self.changed = true;
             },
             _ => {}
@@ -334,7 +363,7 @@ impl App {
             }
             KeyCode::Enter => {
                 if self.name_data.is_empty() { self.error = ErrorDisplay::EmptyField }
-                else if self.passwords.contains_key(&self.name_data) { self.error = ErrorDisplay::DuplicateName }
+                else if self.pw_context.passwords.contains_key(&self.name_data) { self.error = ErrorDisplay::DuplicateName }
                 else {
                     self.error = ErrorDisplay::None;
                     self.enter_mode = EnterMode::Value
@@ -378,12 +407,12 @@ impl App {
     }
 
     fn select_next(&mut self) {
-        if self.passwords.is_empty() {
+        if self.pw_context.passwords.is_empty() {
             self.selection = None;
             return;
         }
 
-        let max_index = self.passwords.len() - 1;
+        let max_index = self.pw_context.passwords.len() - 1;
         self.selection = Some(match self.selection {
             Some(i) if i < max_index as u32 => i + 1,
             _ => max_index as u32,
@@ -391,7 +420,7 @@ impl App {
     }
 
     fn select_previous(&mut self) {
-        if self.passwords.is_empty() {
+        if self.pw_context.passwords.is_empty() {
             self.selection = None;
             return;
         }
@@ -430,24 +459,24 @@ fn encrypt_with_password(plaintext: &str, password: &str) -> EncryptedText {
     }
 }
 
-fn decrypt_with_password(password: &str, encrypted_text: &EncryptedText) -> Result<String, bool> {
+fn decrypt_with_password(password: &str, encrypted_text: &EncryptedText) -> Result<String, Error> {
     let key = derive_key(password, encrypted_text.salt.as_slice());
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
     let nonce_obj = Nonce::from_slice(encrypted_text.nonce.as_slice());
 
-    let decrypted_bytes = cipher.decrypt(nonce_obj, encrypted_text.ciphertext.as_slice()).map_err(|_| {false});
+    let decrypted_bytes = cipher.decrypt(nonce_obj, encrypted_text.ciphertext.as_slice()).map_err(|_| {WrongPassword});
 
     Ok(String::from_utf8(decrypted_bytes?).expect("Invalid UTF-8"))
 }
 
 
 #[derive(Serialize, Deserialize)]
-struct PasswordManager {
+struct PasswordStorageHolder {
     passwords: HashMap<String, EncryptedText>,
     username: String,
 }
 
-impl PasswordManager {
+impl PasswordStorageHolder {
     pub fn load_from_file(path: &String) -> Self {
         bincode::deserialize(&fs::read(path).unwrap()).unwrap()
     }
@@ -465,7 +494,7 @@ impl PasswordManager {
         }
     }
 
-    pub fn decrypt_all(&self, password: String) -> Result<IndexMap<String, String>, bool> {
+    pub fn decrypt_all(&self, password: String) -> Result<IndexMap<String, String>, Error> {
         let mut hm = IndexMap::new();
         for pw in self.passwords.iter() {
             hm.insert(pw.0.to_owned(), decrypt_with_password(&password, pw.1)?);
@@ -486,22 +515,17 @@ struct EncryptedText {
     ciphertext: Vec<u8>
 }
 
-fn prompt_password() -> io::Result<String> {
+fn prompt_password(loc: &String) -> io::Result<String> {
+    print!("Enter password to read password-storage at {}\n> ", loc);
     io::stdout().flush()?;
     let password = read_password()?;
     Ok(password)
 }
 
-fn main() -> Result<()> {
-    print!("Enter password to read password-storage at {}\n> ", find_storage_location());
-    let password = prompt_password();
-    if password.is_err() {
-        println!("Aborted");
-        return Ok(())
-    }
-    color_eyre::install()?;
+fn windowed_main(pw_ctx: PasswordContext) -> io::Result<()> {
+    color_eyre::install().expect("Failed to install color-eyre");
     let terminal = ratatui::init();
-    let app_result = App::new(password?);
+    let app_result = App::new(pw_ctx);
     match app_result {
         Ok(app_result) => {
             let app_result = app_result.run(terminal);
@@ -511,6 +535,101 @@ fn main() -> Result<()> {
         Err(_) => {
             println!("Wrong password!");
             Ok(())
+        }
+    }
+}
+
+fn create_pw_context(matches: &clap::ArgMatches) -> Result<PasswordContext, Error> {
+    let location = matches.get_one("stg").and_then(|t: &String| {Some(t.to_owned())}).unwrap_or_else(|| find_storage_location()).to_owned();
+    let password = matches.get_one("password").and_then(|t: &String| {Some(t.to_owned())}).or_else(|| {match prompt_password(&location) { Ok(s) => { Some(s) } Err(_) => {None} }});
+    if password.is_none() {return Err(WrongPassword)}
+    PasswordContext::auto(password.unwrap(), location)
+}
+
+fn get_main(ctx: PasswordContext, password: &String, mask: bool, copy: bool) -> Result<(), Error> {
+    match ctx.passwords.get(password) {
+        None => {
+            println!("The password `{password}` was not found");
+        }
+        Some(value) => {
+            if copy { copy_to_clipboard(value).map_err(|_| InaccessibleClipboard)?; }
+            let value = if mask { "*".repeat((&value).len()).to_string() } else { value.to_owned() };
+            println!("Password: `{password}` => {value}");
+        }
+    }
+    Ok(())
+}
+
+fn list_main(ctx: PasswordContext) -> Result<(), Error> {
+    for password in ctx.passwords {
+        println!("Password: `{}` => {}", password.0, "*".repeat(password.1.len()));
+    }
+    Ok(())
+}
+
+fn main() -> Result<(), Error> {
+    let matches = clap::Command::new(NAME)
+        .about(DESCRIPTION)
+        .version(VERSION)
+        .disable_version_flag(true)
+        .arg(Arg::new("stg")
+            .long("stg")
+            .short('s')
+            .help("Sets the location of the storage")
+            .value_name("location")
+            .value_hint(AnyPath)
+            .action(clap::ArgAction::Set))
+        .arg(Arg::new("get")
+            .long("get")
+            .short('g')
+            .help("Gets a given password")
+            .value_name("password-name")
+            .action(clap::ArgAction::Set))
+        .arg(Arg::new("password")
+            .long("password")
+            .short('p')
+            .help("Sets the password to use, automates auth")
+            .value_name("password")
+            .action(clap::ArgAction::Set))
+        .arg(Arg::new("mask")
+            .long("mask")
+            .short('m')
+            .requires("get")
+            .help("Mask (hide) password")
+            .action(clap::ArgAction::SetTrue))
+        .arg(Arg::new("copy")
+            .long("copy")
+            .short('c')
+            .requires("get")
+            .help("Copys the password")
+            .action(clap::ArgAction::SetTrue))
+        .arg(Arg::new("list")
+            .conflicts_with_all(["get", "copy", "mask"])
+            .long("list")
+            .short('l')
+            .help("Lists all given passwords")
+            .action(clap::ArgAction::SetTrue))
+        .arg(Arg::new("regen")
+            .exclusive(true)
+            .long("regenerate-stg")
+            .help("Deletes the DEFAULT stg file")
+            .action(clap::ArgAction::SetTrue))
+        .arg(Arg::new("version")
+            .short('v')
+            .long("version")
+            .help("Displays the version")
+            .action(clap::ArgAction::Version))
+        .get_matches();
+    if matches.get_flag("regen") {
+        fs::remove_file(find_storage_location()).map_err(|_| RemovalFailed)
+    } else {
+        let ctx = create_pw_context(&matches)?;
+        if matches.contains_id("get") {
+            get_main(ctx, matches.get_one("get").unwrap(), matches.get_flag("mask"), matches.get_flag("copy"))
+        } else if matches.get_flag("list") {
+            list_main(ctx)
+        } else {
+            windowed_main(ctx).map_err(|e| { Other(e) })
         }
     }
 }
