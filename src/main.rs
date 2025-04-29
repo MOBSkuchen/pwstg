@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use std::{fs, io};
 use std::io::Write;
+use std::iter::{Skip, Take};
+use std::ops::Index;
+use std::vec::IntoIter;
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use chacha20poly1305::aead::{Aead, KeyInit, OsRng, rand_core::RngCore};
 use argon2::{Argon2};
@@ -54,21 +57,50 @@ struct App {
     changed: bool,
     error: ErrorDisplay,
     show_pwd: bool,
+    ctx_edit: bool
 }
 
-fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
-    let vertical = Layout::vertical([Constraint::Percentage(percent_y)]).flex(Flex::Center);
-    let horizontal = Layout::horizontal([Constraint::Percentage(percent_x)]).flex(Flex::Center);
+fn popup_area(area: Rect) -> Rect {
+    let vertical = Layout::vertical([Constraint::Length(4)]).flex(Flex::Center);
+    let horizontal = Layout::horizontal([Constraint::Percentage(70)]).flex(Flex::Center);
     let [area] = vertical.areas(area);
     let [area] = horizontal.areas(area);
     area
 }
+
+fn selection_window<T>(
+    iter: impl IntoIterator<Item = T>,
+    selected: usize,
+    max_height: usize,
+) -> Vec<T> {
+    let vec: Vec<T> = iter.into_iter().collect();
+    let total = vec.len();
+
+    if total == 0 || max_height == 0 {
+        return vec![];
+    }
+
+    let half_height = max_height / 2;
+
+    let mut start = selected.saturating_sub(half_height);
+    let mut end = start + max_height;
+
+    if end > total {
+        end = total;
+        start = end.saturating_sub(max_height);
+    }
+
+    Vec::from_iter(vec.into_iter().skip(start).take(end - start))
+}
+
+
 
 impl App {
     fn new(password: String) -> Result<Self, bool> {
         let pw_file = find_storage_location();
         let pw_man = PasswordManager::init(&pw_file);
         Ok(Self {
+            ctx_edit: false,
             show_pwd: false,
             error: ErrorDisplay::None,
             changed: false,
@@ -89,6 +121,7 @@ impl App {
         while !self.should_exit {
             match self.enter_mode {
                 EnterMode::None => {
+                    self.ctx_edit = false;
                     terminal.hide_cursor().expect("Failed to hide cursor");
                     terminal.draw(|frame| self.draw_em_none(frame))?;
                     if let Event::Key(key) = event::read()? {
@@ -107,6 +140,8 @@ impl App {
                     terminal.draw(|frame| self.draw_em_value(frame))?;
                     if let Event::Key(key) = event::read()? {
                         self.handle_key_em_value(key);
+                    } else {
+                        self.show_pwd = false;
                     }
                 }
             }
@@ -137,7 +172,7 @@ impl App {
         frame.render_widget(paragraph, instructions);
 
         let block = Paragraph::new(&*self.name_data).block(Block::bordered().title("Enter Password Name"));
-        let area = popup_area(area, 60, 20);
+        let area = popup_area(area);
         frame.render_widget(block, area);
     }
 
@@ -153,7 +188,7 @@ impl App {
         frame.render_widget(paragraph, instructions);
         
         let block = Paragraph::new(if self.show_pwd { self.value_data.to_owned() } else { "*".repeat(self.value_data.len()) }).block(Block::bordered().title("Enter Password"));
-        let area = popup_area(area, 60, 20);
+        let area = popup_area(area);
         frame.render_widget(block, area);
     }
 
@@ -174,28 +209,33 @@ impl App {
         frame.render_widget(Paragraph::new(text).bold().centered(), header_area);
         frame.render_widget(Paragraph::new("Use ↓↑ to move, + / a to add one, v to view / hide, TAB to show all\nc to copy password, e to edit, r to remove, s to save, ESC to unselect, q to quit.").centered(), footer_area);
 
+        let i = self.selection.unwrap_or(0) as usize;
+        let x = left.height as usize;
+        
         let block = Block::new()
             .title(Line::raw("Passwords").left_aligned())
             .borders(Borders::BOTTOM)
             .border_set(symbols::border::ROUNDED);
 
         frame.render_widget(block, top);
+        
+        let pw_it_1 = selection_window(self.passwords.keys(), i, x);
+        let pw_it_2 = selection_window(self.passwords.iter(), i, x);
 
-        let items: Vec<ListItem> = self.passwords.keys()
+        let items: Vec<ListItem> = pw_it_1.iter()
             .enumerate()
             .map(|(i, pw_name)| {
                 if self.selection.is_some_and(|x| {x==i as u32}) {
                     ListItem::new(Line::styled(format!("> {pw_name}"), Style::from(Color::Cyan)))
                 } else {
-                    ListItem::new(Line::styled(pw_name, Style::default()))
+                    ListItem::new(Line::styled(*pw_name, Style::default()))
                 }
             })
             .collect();
 
         frame.render_widget(List::new(items), left);
 
-        let items: Vec<ListItem> = self.passwords
-            .iter()
+        let items: Vec<ListItem> = pw_it_2.iter()
             .enumerate()
             .map(|(i, pw_name)| {
                 let pw = if self.show_pwd || self.viewing.contains(&(i as u32)) { pw_name.1.to_owned() } else { "*".repeat(pw_name.1.len()) };
@@ -224,7 +264,6 @@ impl App {
     }
 
     fn handle_key_em_none(&mut self, key: KeyEvent) {
-        self.show_pwd = false;
         if key.kind != KeyEventKind::Press {
             return;
         }
@@ -241,7 +280,7 @@ impl App {
                 self.changed = false;
             },
             KeyCode::Tab => {
-                self.show_pwd = true
+                self.show_pwd = !self.show_pwd;
             }
             KeyCode::Char('v') if self.selection.is_some() => {
                 let i = self.selection.unwrap();
@@ -252,6 +291,7 @@ impl App {
                 }
             },
             KeyCode::Char('e') if self.selection.is_some() => {
+                self.ctx_edit = true;
                 let val = self.passwords.get_index(self.selection.unwrap() as usize).unwrap();
 
                 self.name_data = val.0.to_string();
@@ -284,7 +324,9 @@ impl App {
         
         match key.code {
             KeyCode::Esc => {
+                if self.ctx_edit { self.add_password() }
                 self.name_data = String::new();
+                self.value_data = String::new();
                 self.enter_mode = EnterMode::None
             },
             KeyCode::Backspace => {
@@ -317,7 +359,7 @@ impl App {
                 self.value_data.pop();
             }
             KeyCode::Tab => {
-                self.show_pwd = true
+                self.show_pwd = !self.show_pwd;
             }
             KeyCode::Char(c) => {
                 self.value_data.push(c)
