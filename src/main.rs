@@ -394,7 +394,7 @@ struct PasswordManager {
 
 impl PasswordManager {
     pub fn load_from_file(path: &String) -> Self {
-        bincode::deserialize(&*fs::read(path).unwrap()).unwrap()
+        bincode::deserialize(&fs::read(path).unwrap()).unwrap()
     }
 
     pub fn to_file(&self, path: &String) {
@@ -418,8 +418,8 @@ impl PasswordManager {
         hm
     }
 
-    pub fn add_password(&mut self, password: String, name: String, value: &String) {
-        let enc = encrypt_with_password(&*value, &password);
+    pub fn add_password(&mut self, password: String, name: String, value: &str) {
+        let enc = encrypt_with_password(value, &password);
         self.passwords.insert(name, enc);
     }
 }
