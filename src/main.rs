@@ -14,6 +14,12 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{symbols, DefaultTerminal, Frame};
 
+fn find_storage_location() -> String {
+    let mut base_dir = dirs::data_local_dir().expect("Failed to find local app data path");
+    base_dir.push(".pw_stg");
+    base_dir.to_str().unwrap().to_string()
+}
+
 enum EnterMode {
     None,
     Name,
@@ -44,7 +50,7 @@ fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
 
 impl App {
     fn new(password: String) -> Self {
-        let pw_file = ".pw_stg".to_string();
+        let pw_file = find_storage_location();
         let pw_man = PasswordManager::init(&pw_file);
         Self {
             changed: false,
@@ -134,7 +140,7 @@ impl App {
             text = format!("{text} <unsaved changes>");
         }
         frame.render_widget(Paragraph::new(text).bold().centered(), header_area);
-        frame.render_widget(Paragraph::new("Use ↓↑ to move, v to view / hide, e to edit, r to remove, s to save, q to quit.").centered(), footer_area);
+        frame.render_widget(Paragraph::new("Use ↓↑ to move, + / a to add one, v to view / hide, e to edit, r to remove, s to save, q to quit.").centered(), footer_area);
 
         let block = Block::new()
             .title(Line::raw("Passwords").left_aligned())
@@ -174,7 +180,7 @@ impl App {
 
     fn add_password(&mut self) {
         self.changed = true;
-        
+
         let name = self.name_data.clone();
         let value = self.value_data.clone();
 
@@ -190,7 +196,7 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char('+') => self.enter_mode = EnterMode::Name,
+            KeyCode::Char('+') | KeyCode::Char('a') => self.enter_mode = EnterMode::Name,
             KeyCode::Char('q') | KeyCode::Esc => self.should_exit = true,
             KeyCode::Char('h') | KeyCode::Left => self.select_none(),
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
@@ -235,6 +241,7 @@ impl App {
         
         match key.code {
             KeyCode::Esc => self.enter_mode = EnterMode::None,
+            KeyCode::Char('q') => self.should_exit = true,
             KeyCode::Backspace => {
                 self.name_data.pop();
             }
@@ -255,6 +262,7 @@ impl App {
 
         match key.code {
             KeyCode::Esc => self.enter_mode = EnterMode::Name,
+            KeyCode::Char('q') => self.should_exit = true,
             KeyCode::Backspace => {
                 self.value_data.pop();
             }
@@ -274,11 +282,28 @@ impl App {
     }
 
     fn select_next(&mut self) {
-        self.selection = self.selection.and_then(|t| {if !(t >= (self.passwords.len() - 1) as u32) { Some(t + 1) } else {Some((self.passwords.len() - 1) as u32)}}).or(Some(0))
+        if self.passwords.is_empty() {
+            self.selection = None;
+            return;
+        }
+
+        let max_index = self.passwords.len() - 1;
+        self.selection = Some(match self.selection {
+            Some(i) if i < max_index as u32 => i + 1,
+            _ => max_index as u32,
+        });
     }
-    
+
     fn select_previous(&mut self) {
-        self.selection = self.selection.and_then(|t| if t != 0 { Some(t - 1) } else {Some(0)}).or(Some(0))
+        if self.passwords.is_empty() {
+            self.selection = None;
+            return;
+        }
+
+        self.selection = Some(match self.selection {
+            Some(i) if i > 0 => i - 1,
+            _ => 0,
+        });
     }
 }
 
