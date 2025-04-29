@@ -5,7 +5,6 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use chacha20poly1305::aead::{Aead, KeyInit, OsRng, rand_core::RngCore};
 use argon2::{Argon2};
 use serde::{Deserialize, Serialize};
-
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
