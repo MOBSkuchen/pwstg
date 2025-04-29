@@ -17,7 +17,7 @@ use arboard::Clipboard;
 use clap::Arg;
 use clap::ValueHint::AnyPath;
 use rpassword::read_password;
-use crate::Error::{InaccessibleClipboard, Other, RemovalFailed, WrongPassword};
+use crate::Error::{InaccessibleClipboard, Other, RemovalFailed, WrongPassword, StorageFileNotFound};
 
 pub const NAME: &str = env!("CARGO_PKG_NAME");
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -28,7 +28,7 @@ enum Error {
     RemovalFailed,
     InaccessibleClipboard,
     WrongPassword,
-    StorageFileNotFound,
+    StorageFileNotFound(String),
     Other(io::Error),
 }
 
@@ -68,7 +68,7 @@ impl PasswordContext {
     }
     
     pub fn auto(password: String, pw_file: String) -> Result<Self, Error> {
-        let pw_man = PasswordStorageHolder::init(&pw_file);
+        let pw_man = PasswordStorageHolder::init(&pw_file)?;
         let passwords = pw_man.decrypt_all(password.clone())?;
         Ok(Self::new(pw_man, passwords, password))
     }
@@ -143,7 +143,7 @@ impl App {
         })
     }
 
-    fn run(mut self, mut terminal: DefaultTerminal) -> std::io::Result<()> {
+    fn run(mut self, mut terminal: DefaultTerminal) -> io::Result<()> {
         while !self.should_exit {
             match self.enter_mode {
                 EnterMode::None => {
@@ -477,20 +477,20 @@ struct PasswordStorageHolder {
 }
 
 impl PasswordStorageHolder {
-    pub fn load_from_file(path: &String) -> Self {
-        bincode::deserialize(&fs::read(path).unwrap()).unwrap()
+    pub fn load_from_file(path: &String) -> Result<Self, Error> {
+        bincode::deserialize(&fs::read(path).map_err(|_| {StorageFileNotFound(path.to_owned())})?).map_err(|_| {StorageFileNotFound(path.to_owned())})
     }
 
     pub fn to_file(&self, path: &String) {
         fs::write(path, bincode::serialize(self).unwrap()).expect("Failed to write");
     }
 
-    pub fn init(path: &String) -> Self {
+    pub fn init(path: &String) -> Result<Self, Error> {
         if fs::exists(path).unwrap() { Self::load_from_file(path) }
         else {
             let s = Self {passwords: HashMap::new(), username: whoami::username().unwrap()};
             s.to_file(path);
-            s
+            Ok(s)
         }
     }
 
@@ -540,8 +540,8 @@ fn windowed_main(pw_ctx: PasswordContext) -> io::Result<()> {
 }
 
 fn create_pw_context(matches: &clap::ArgMatches) -> Result<PasswordContext, Error> {
-    let location = matches.get_one("stg").and_then(|t: &String| {Some(t.to_owned())}).unwrap_or_else(|| find_storage_location()).to_owned();
-    let password = matches.get_one("password").and_then(|t: &String| {Some(t.to_owned())}).or_else(|| {match prompt_password(&location) { Ok(s) => { Some(s) } Err(_) => {None} }});
+    let location = matches.get_one("stg").map(|t: &String| t.to_owned()).unwrap_or_else(find_storage_location).to_owned();
+    let password = matches.get_one("password").map(|t: &String| t.to_owned()).or_else(|| {prompt_password(&location).ok()});
     if password.is_none() {return Err(WrongPassword)}
     PasswordContext::auto(password.unwrap(), location)
 }
@@ -553,7 +553,7 @@ fn get_main(ctx: PasswordContext, password: &String, mask: bool, copy: bool) -> 
         }
         Some(value) => {
             if copy { copy_to_clipboard(value).map_err(|_| InaccessibleClipboard)?; }
-            let value = if mask { "*".repeat((&value).len()).to_string() } else { value.to_owned() };
+            let value = if mask { "*".repeat(value.len()).to_string() } else { value.to_owned() };
             println!("Password: `{password}` => {value}");
         }
     }
@@ -567,7 +567,7 @@ fn list_main(ctx: PasswordContext) -> Result<(), Error> {
     Ok(())
 }
 
-fn main() -> Result<(), Error> {
+fn main2() -> Result<(), Error> {
     let matches = clap::Command::new(NAME)
         .about(DESCRIPTION)
         .version(VERSION)
@@ -630,6 +630,29 @@ fn main() -> Result<(), Error> {
             list_main(ctx)
         } else {
             windowed_main(ctx).map_err(|e| { Other(e) })
+        }
+    }
+}
+
+fn main() {
+    let result = main2();
+    if let Err(e) = result {
+        match e {
+            RemovalFailed => {
+                println!("Failed to remove the default storage");
+            }
+            InaccessibleClipboard => {
+                println!("Could not access your clipboard");
+            }
+            WrongPassword => {
+                println!("The given password was wrong")
+            }
+            StorageFileNotFound(loc) => {
+                println!("The storage file was not found (or could not be opened) at {loc}");
+            }
+            Other(o) => {
+                println!("System error: {}", o);
+            }
         }
     }
 }
