@@ -4,8 +4,9 @@ description = "Password manager utility"
 authors = ["MOBSkuchen"]
 version = "0.1.0"
 edition = "2021"
-repository = "github.com/MOBSkuchen/pwstg"
+repository = "https://github.com/MOBSkuchen/pwstg"
 readme = "README.md"
+license-file = "LICENSE"
 
 [dependencies]
 chacha20poly1305 = "0.10"
