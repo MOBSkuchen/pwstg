@@ -360,25 +360,6 @@ fn decrypt_with_password(password: &str, encrypted_text: &EncryptedText) -> Stri
     String::from_utf8(decrypted_bytes).expect("Invalid UTF-8")
 }
 
-fn verify_password(password: &str, password_hash_str: &str) -> bool {
-    let parsed_hash = PasswordHash::new(password_hash_str)
-        .expect("Invalid password hash format");
-
-    Argon2::default()
-        .verify_password(password.as_bytes(), &parsed_hash)
-        .is_ok()
-}
-
-fn hash_password(password: &str) -> String {
-    let salt = SaltString::generate(&mut PasswordOsRng);
-    let argon2 = Argon2::default();
-
-    let password_hash = argon2.hash_password(password.as_bytes(), &salt)
-        .expect("Password hashing failed")
-        .to_string();
-
-    password_hash
-}
 
 #[derive(Serialize, Deserialize)]
 struct PasswordManager {
