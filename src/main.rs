@@ -60,17 +60,18 @@ struct PasswordContext {
     password_manager: PasswordStorageHolder,
     passwords: IndexMap<String, String>,
     password: String,
+    pw_file: String
 }
 
 impl PasswordContext {
-    pub fn new(password_manager: PasswordStorageHolder, passwords: IndexMap<String, String>, password: String) -> Self {
-        Self { password_manager, passwords, password }
+    pub fn new(password_manager: PasswordStorageHolder, passwords: IndexMap<String, String>, password: String, pw_file: String) -> Self {
+        Self { password_manager, passwords, password, pw_file }
     }
     
     pub fn auto(password: String, pw_file: String) -> Result<Self, Error> {
         let pw_man = PasswordStorageHolder::init(&pw_file)?;
         let passwords = pw_man.decrypt_all(password.clone())?;
-        Ok(Self::new(pw_man, passwords, password))
+        Ok(Self::new(pw_man, passwords, password, pw_file))
     }
 }
 
@@ -81,7 +82,6 @@ struct App {
     should_exit: bool,
     selection: Option<u32>,
     viewing: Vec<u32>,
-    pw_file: String,
     changed: bool,
     error: ErrorDisplay,
     show_pwd: bool,
@@ -126,13 +126,11 @@ fn selection_window<T>(
 
 impl App {
     fn new(pw_context: PasswordContext) -> Result<Self, bool> {
-        let pw_file = find_storage_location();
         Ok(Self {
             ctx_edit: false,
             show_pwd: false,
             error: ErrorDisplay::None,
             changed: false,
-            pw_file,
             viewing: Vec::new(),
             pw_context,
             selection: None,
@@ -228,7 +226,7 @@ impl App {
         ]).areas(area);
 
         let [left, right] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(main);
-        let mut text = format!("pwstg - Password Storage by MOBSkuchen\nPasswords are at: {}", self.pw_file);
+        let mut text = format!("pwstg - Password Storage by MOBSkuchen\nPasswords are at: {}", self.pw_context.pw_file);
         if self.changed {
             text = format!("{text} <unsaved changes>");
         }
@@ -302,7 +300,7 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_previous(),
             KeyCode::Char('s') => {
-                self.pw_context.password_manager.to_file(&self.pw_file);
+                self.pw_context.password_manager.to_file(&self.pw_context.pw_file);
                 self.changed = false;
             },
             KeyCode::Tab => {
