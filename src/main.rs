@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use indexmap::IndexMap;
-use std::fs;
+use std::{fs, io};
+use std::io::Write;
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use chacha20poly1305::aead::{Aead, KeyInit, OsRng, rand_core::RngCore};
 use argon2::{Argon2};
@@ -13,6 +14,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{symbols, DefaultTerminal, Frame};
 use arboard::Clipboard;
+use rpassword::read_password;
 
 fn find_storage_location() -> String {
     let mut base_dir = dirs::data_local_dir().expect("Failed to find local app data path");
@@ -63,16 +65,16 @@ fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
 }
 
 impl App {
-    fn new(password: String) -> Self {
+    fn new(password: String) -> Result<Self, bool> {
         let pw_file = find_storage_location();
         let pw_man = PasswordManager::init(&pw_file);
-        Self {
+        Ok(Self {
             show_pwd: false,
             error: ErrorDisplay::None,
             changed: false,
             pw_file,
             viewing: Vec::new(),
-            passwords: pw_man.decrypt_all(password.clone()),
+            passwords: pw_man.decrypt_all(password.clone())?,
             password,
             selection: None,
             value_data: String::new(),
@@ -80,7 +82,7 @@ impl App {
             enter_mode: EnterMode::None,
             should_exit: false,
             password_manager: pw_man,
-        }
+        })
     }
 
     fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
@@ -226,7 +228,7 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
-        
+
         match key.code {
             KeyCode::Char('+') | KeyCode::Char('a') => self.enter_mode = EnterMode::Name,
             KeyCode::Char('q') => self.should_exit = true,
@@ -389,15 +391,14 @@ fn encrypt_with_password(plaintext: &str, password: &str) -> EncryptedText {
     }
 }
 
-fn decrypt_with_password(password: &str, encrypted_text: &EncryptedText) -> String {
+fn decrypt_with_password(password: &str, encrypted_text: &EncryptedText) -> Result<String, bool> {
     let key = derive_key(password, encrypted_text.salt.as_slice());
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
     let nonce_obj = Nonce::from_slice(encrypted_text.nonce.as_slice());
 
-    let decrypted_bytes = cipher.decrypt(nonce_obj, encrypted_text.ciphertext.as_slice())
-        .expect("Decryption failure");
+    let decrypted_bytes = cipher.decrypt(nonce_obj, encrypted_text.ciphertext.as_slice()).map_err(|_| {false});
 
-    String::from_utf8(decrypted_bytes).expect("Invalid UTF-8")
+    Ok(String::from_utf8(decrypted_bytes?).expect("Invalid UTF-8"))
 }
 
 
@@ -425,12 +426,12 @@ impl PasswordManager {
         }
     }
 
-    pub fn decrypt_all(&self, password: String) -> IndexMap<String, String> {
+    pub fn decrypt_all(&self, password: String) -> Result<IndexMap<String, String>, bool> {
         let mut hm = IndexMap::new();
         for pw in self.passwords.iter() {
-            hm.insert(pw.0.to_owned(), decrypt_with_password(&password, pw.1));
+            hm.insert(pw.0.to_owned(), decrypt_with_password(&password, pw.1)?);
         }
-        hm
+        Ok(hm)
     }
 
     pub fn add_password(&mut self, password: String, name: String, value: &str) {
@@ -446,10 +447,31 @@ struct EncryptedText {
     ciphertext: Vec<u8>
 }
 
+fn prompt_password() -> io::Result<String> {
+    io::stdout().flush()?;
+    let password = read_password()?;
+    Ok(password)
+}
+
 fn main() -> Result<()> {
+    print!("Enter password to read password-storage at {}\n> ", find_storage_location());
+    let password = prompt_password();
+    if password.is_err() {
+        println!("Aborted");
+        return Ok(())
+    }
     color_eyre::install()?;
     let terminal = ratatui::init();
-    let app_result = App::new("katja".into()).run(terminal);
-    ratatui::restore();
-    app_result
+    let app_result = App::new(password?);
+    match app_result {
+        Ok(app_result) => {
+            let app_result = app_result.run(terminal);
+            ratatui::restore();
+            app_result
+        }
+        Err(_) => {
+            println!("Wrong password!");
+            Ok(())
+        }
+    }
 }
