@@ -13,6 +13,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{symbols, DefaultTerminal, Frame};
+use arboard::Clipboard;
 
 fn find_storage_location() -> String {
     let mut base_dir = dirs::data_local_dir().expect("Failed to find local app data path");
@@ -20,10 +21,22 @@ fn find_storage_location() -> String {
     base_dir.to_str().unwrap().to_string()
 }
 
+fn copy_to_clipboard(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut clipboard = Clipboard::new()?;
+    clipboard.set_text(text.to_string())?;
+    Ok(())
+}
+
 enum EnterMode {
     None,
     Name,
     Value
+}
+
+enum ErrorDisplay {
+    None,
+    EmptyField,
+    DuplicateName,
 }
 
 struct App {
@@ -38,6 +51,7 @@ struct App {
     viewing: Vec<u32>,
     pw_file: String,
     changed: bool,
+    error: ErrorDisplay,
 }
 
 fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -53,6 +67,7 @@ impl App {
         let pw_file = find_storage_location();
         let pw_man = PasswordManager::init(&pw_file);
         Self {
+            error: ErrorDisplay::None,
             changed: false,
             pw_file,
             viewing: Vec::new(),
@@ -92,12 +107,23 @@ impl App {
         }
         Ok(())
     }
+    
+    fn draw_error(&self, frame: &mut Frame, area: Rect) {
+        let text = match self.error {
+            ErrorDisplay::None => return,
+            ErrorDisplay::EmptyField => "This field may not be empty",
+            ErrorDisplay::DuplicateName => "Password with the same name already exists"
+        };
+        
+        let paragraph = Paragraph::new(text.rapid_blink().red()).centered();
+        frame.render_widget(paragraph, area);
+    }
 
     fn draw_em_name(&self, frame: &mut Frame) {
         let area = frame.area();
 
-        let vertical = Layout::vertical([Constraint::Percentage(20), Constraint::Percentage(80)]);
-        let [instructions, content] = vertical.areas(area);
+        let [instructions, ed] = Layout::vertical([Constraint::Length(1), Constraint::Length(2)]).areas(area);
+        self.draw_error(frame, ed);
         
         let paragraph = Paragraph::new("Press ESC to go back".slow_blink())
             .centered()
@@ -112,8 +138,8 @@ impl App {
     fn draw_em_value(&self, frame: &mut Frame) {
         let area = frame.area();
 
-        let vertical = Layout::vertical([Constraint::Percentage(20), Constraint::Percentage(80)]);
-        let [instructions, content] = vertical.areas(area);
+        let [instructions, ed] = Layout::vertical([Constraint::Length(1), Constraint::Length(2)]).areas(area);
+        self.draw_error(frame, ed);
 
         let paragraph = Paragraph::new("Press ESC to go back".slow_blink())
             .centered()
@@ -140,7 +166,7 @@ impl App {
             text = format!("{text} <unsaved changes>");
         }
         frame.render_widget(Paragraph::new(text).bold().centered(), header_area);
-        frame.render_widget(Paragraph::new("Use ↓↑ to move, + / a to add one, v to view / hide, e to edit, r to remove, s to save, q to quit.").centered(), footer_area);
+        frame.render_widget(Paragraph::new("Use ↓↑ to move, + / a to add one, v to view / hide, c to copy password\ne to edit, r to remove, s to save, q to quit.").centered(), footer_area);
 
         let block = Block::new()
             .title(Line::raw("Passwords").left_aligned())
@@ -224,6 +250,10 @@ impl App {
                 self.passwords.swap_remove_index(self.selection.unwrap() as usize);
                 self.changed = true;
             },
+            KeyCode::Char('c') if self.selection.is_some() => {
+                let val = self.passwords.get_index(self.selection.unwrap() as usize).unwrap();
+                copy_to_clipboard(val.1).expect("Failed to copy to clipboard");
+            },
             KeyCode::Char('r') if self.selection.is_some() => {
                 let val = self.passwords.get_index(self.selection.unwrap() as usize).unwrap();
                 self.password_manager.passwords.remove(val.0);
@@ -240,8 +270,10 @@ impl App {
         }
         
         match key.code {
-            KeyCode::Esc => self.enter_mode = EnterMode::None,
-            KeyCode::Char('q') => self.should_exit = true,
+            KeyCode::Esc => { 
+                self.name_data = String::new();
+                self.enter_mode = EnterMode::None
+            },
             KeyCode::Backspace => {
                 self.name_data.pop();
             }
@@ -249,7 +281,12 @@ impl App {
                 self.name_data.push(c);
             }
             KeyCode::Enter => {
-                self.enter_mode = EnterMode::Value
+                if self.name_data.is_empty() { self.error = ErrorDisplay::EmptyField }
+                else if self.passwords.contains_key(&self.name_data) { self.error = ErrorDisplay::DuplicateName }
+                else {
+                    self.error = ErrorDisplay::None;
+                    self.enter_mode = EnterMode::Value
+                }
             }
             _ => {}
         }
@@ -262,7 +299,6 @@ impl App {
 
         match key.code {
             KeyCode::Esc => self.enter_mode = EnterMode::Name,
-            KeyCode::Char('q') => self.should_exit = true,
             KeyCode::Backspace => {
                 self.value_data.pop();
             }
@@ -270,7 +306,11 @@ impl App {
                 self.value_data.push(c);
             }
             KeyCode::Enter => {
-                self.enter_mode = EnterMode::None;
+                if self.value_data.is_empty() { self.error = ErrorDisplay::EmptyField }
+                else {
+                    self.error = ErrorDisplay::None;
+                    self.enter_mode = EnterMode::None
+                }
                 self.add_password();
             }
             _ => {}
