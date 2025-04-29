@@ -1,29 +1,18 @@
 use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::fs;
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use chacha20poly1305::aead::{Aead, KeyInit, OsRng, rand_core::RngCore};
-use argon2::{Argon2, PasswordHasher};
-use argon2::password_hash::{SaltString, PasswordHash, PasswordVerifier, rand_core::OsRng as PasswordOsRng};
-use hex;
-use bincode;
+use argon2::{Argon2};
 use serde::{Deserialize, Serialize};
 
 use color_eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::palette::tailwind::{BLUE, GREEN, SLATE};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph, StatefulWidget, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::{symbols, DefaultTerminal, Frame};
-
-const TODO_HEADER_STYLE: Style = Style::new().fg(SLATE.c100).bg(BLUE.c800);
-const NORMAL_ROW_BG: Color = SLATE.c950;
-const ALT_ROW_BG_COLOR: Color = SLATE.c900;
-const SELECTED_STYLE: Style = Style::new().bg(SLATE.c800).add_modifier(Modifier::BOLD);
-const TEXT_FG_COLOR: Color = SLATE.c200;
-const COMPLETED_TEXT_FG_COLOR: Color = GREEN.c500;
 
 enum EnterMode {
     None,
@@ -37,25 +26,11 @@ struct App {
     value_data: String,
     should_exit: bool,
     password_manager: PasswordManager,
+    passwords: IndexMap<String, String>,
     selection: Option<u32>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum Status {
-    Todo,
-    Completed,
-}
-
-impl Default for App {
-    fn default() -> Self {
-        Self {
-            value_data: String::new(),
-            name_data: String::new(),
-            enter_mode: EnterMode::None,
-            should_exit: false,
-            password_manager: PasswordManager::init(".pw_stg".to_string()),
-        }
-    }
+    password: String,
+    viewing: Vec<u32>,
+    pw_file: String,
 }
 
 fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -67,11 +42,28 @@ fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
 }
 
 impl App {
+    fn new(password: String) -> Self {
+        let pw_file = ".pw_stg".to_string();
+        let pw_man = PasswordManager::init(&pw_file);
+        Self {
+            pw_file,
+            viewing: Vec::new(),
+            passwords: pw_man.decrypt_all(password.clone()),
+            password,
+            selection: None,
+            value_data: String::new(),
+            name_data: String::new(),
+            enter_mode: EnterMode::None,
+            should_exit: false,
+            password_manager: pw_man,
+        }
+    }
+
     fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         while !self.should_exit {
             match self.enter_mode {
                 EnterMode::None => {
-                    terminal.draw(|frame| frame.render_widget(&mut self, frame.area()))?;
+                    terminal.draw(|frame| self.draw_em_none(frame))?;
                     if let Event::Key(key) = event::read()? {
                         self.handle_key_em_none(key);
                     }
@@ -125,6 +117,67 @@ impl App {
         frame.render_widget(block, area);
     }
 
+    fn draw_em_none(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let [header_area, top, main, footer_area] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Length(2),
+            Constraint::Fill(1),
+            Constraint::Length(2),
+        ]).areas(area);
+
+        let [left, right] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(main);
+
+        frame.render_widget(Paragraph::new("Ratatui Todo List Example").bold().centered(), header_area);
+        frame.render_widget(Paragraph::new("Use ↓↑ to move, ← to unselect, → to change status, g/G to go top/bottom.").centered(), footer_area);
+
+        let block = Block::new()
+            .title(Line::raw("Passwords").left_aligned())
+            .borders(Borders::BOTTOM)
+            .border_set(symbols::border::ROUNDED);
+
+        frame.render_widget(block, top);
+
+        let items: Vec<ListItem> = self.passwords.keys()
+            .enumerate()
+            .map(|(i, pw_name)| {
+                if self.selection.is_some_and(|x| {x==i as u32}) {
+                    ListItem::new(Line::styled(format!("> {pw_name}"), Style::from(Color::Cyan)))
+                } else {
+                    ListItem::new(Line::styled(pw_name, Style::default()))
+                }
+            })
+            .collect();
+
+        frame.render_widget(List::new(items), left);
+
+        let items: Vec<ListItem> = self.passwords
+            .iter()
+            .enumerate()
+            .map(|(i, pw_name)| {
+                let pw = if self.viewing.contains(&(i as u32)) { pw_name.1.to_owned() } else { "*".repeat(pw_name.1.len()) };
+                if self.selection.is_some_and(|x| {x==i as u32}) {
+                    ListItem::new(Line::styled(pw, Style::from(Color::Cyan)))
+                } else {
+                    ListItem::new(Line::styled(pw, Style::default()))
+                }
+            })
+            .collect();
+
+        frame.render_widget(List::new(items), right);
+    }
+
+    fn add_password(&mut self) {
+        let name = self.name_data.clone();
+        let value = self.value_data.clone();
+
+        self.name_data = String::new();
+        self.value_data = String::new();
+
+        self.password_manager.add_password(self.password.clone(), name.clone(), &value);
+        self.passwords.insert(name, value);
+    }
+
     fn handle_key_em_none(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
@@ -135,11 +188,33 @@ impl App {
             KeyCode::Char('h') | KeyCode::Left => self.select_none(),
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_previous(),
-            KeyCode::Char('g') | KeyCode::Home => self.select_first(),
-            KeyCode::Char('G') | KeyCode::End => self.select_last(),
-            KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => {
-                self.toggle_status();
-            }
+            KeyCode::Char('s') => {
+                self.password_manager.to_file(&self.pw_file);
+                self.should_exit = true
+            },
+            KeyCode::Char('v') if self.selection.is_some() => {
+                let i = self.selection.unwrap();
+                if let Some(index) = self.viewing.iter().position(|value| *value == i) {
+                    self.viewing.swap_remove(index);
+                } else {
+                    self.viewing.push(i);
+                }
+            },
+            KeyCode::Char('e') if self.selection.is_some() => {
+                let val = self.passwords.get_index(self.selection.unwrap() as usize).unwrap();
+
+                self.name_data = val.0.to_string();
+                self.value_data = val.1.to_string();
+                self.enter_mode = EnterMode::Name;
+
+                self.password_manager.passwords.remove(&self.name_data);
+                self.passwords.swap_remove_index(self.selection.unwrap() as usize);
+            },
+            KeyCode::Char('r') if self.selection.is_some() => {
+                let val = self.passwords.get_index(self.selection.unwrap() as usize).unwrap();
+                self.password_manager.passwords.remove(val.0);
+                self.passwords.swap_remove_index(self.selection.unwrap() as usize);
+            },
             _ => {}
         }
     }
@@ -178,8 +253,8 @@ impl App {
                 self.value_data.push(c);
             }
             KeyCode::Enter => {
-                self.enter_mode = EnterMode::None
-                // TODO: Add pushing and shit
+                self.enter_mode = EnterMode::None;
+                self.add_password();
             }
             _ => {}
         }
@@ -190,126 +265,11 @@ impl App {
     }
 
     fn select_next(&mut self) {
-        self.selection = self.selection.and_then(|t| {Some(t+1)}).or(Some(0))
+        self.selection = self.selection.and_then(|t| {if !(t >= (self.passwords.len() - 1) as u32) { Some(t + 1) } else {Some((self.passwords.len() - 1) as u32)}}).or(Some(0))
     }
     
     fn select_previous(&mut self) {
-        self.selection = self.selection.and_then(|t| {Some(t-1)}).or(Some(0))
-    }
-}
-
-impl Widget for &mut App {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let [header_area, main_area, footer_area] = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Fill(1),
-            Constraint::Length(1),
-        ])
-            .areas(area);
-
-        let [list_area, item_area] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(main_area);
-
-        App::render_header(header_area, buf);
-        App::render_footer(footer_area, buf);
-        self.render_list(list_area, buf);
-        self.render_selected_item(item_area, buf);
-    }
-}
-
-/// Rendering logic for the app
-impl App {
-    fn render_header(area: Rect, buf: &mut Buffer) {
-        Paragraph::new("Ratatui Todo List Example")
-            .bold()
-            .centered()
-            .render(area, buf);
-    }
-
-    fn render_footer(area: Rect, buf: &mut Buffer) {
-        Paragraph::new("Use ↓↑ to move, ← to unselect, → to change status, g/G to go top/bottom.")
-            .centered()
-            .render(area, buf);
-    }
-
-    fn render_list(&mut self, area: Rect, buf: &mut Buffer) {
-        let block = Block::new()
-            .title(Line::raw("Passwords").centered())
-            .borders(Borders::TOP)
-            .border_set(symbols::border::EMPTY)
-            .border_style(TODO_HEADER_STYLE)
-            .bg(NORMAL_ROW_BG);
-
-        // Iterate through all elements in the `items` and stylize them.
-        let items: Vec<ListItem> = self
-            .todo_list
-            .items
-            .iter()
-            .enumerate()
-            .map(|(i, todo_item)| {
-                let color = alternate_colors(i);
-                ListItem::from(todo_item).bg(color)
-            })
-            .collect();
-
-        // Create a List from all list items and highlight the currently selected one
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(SELECTED_STYLE)
-            .highlight_symbol(">")
-            .highlight_spacing(HighlightSpacing::Always);
-
-        // We need to disambiguate this trait method as both `Widget` and `StatefulWidget` share the
-        // same method name `render`.
-        StatefulWidget::render(list, area, buf, &mut self.todo_list.state);
-    }
-
-    fn render_selected_item(&self, area: Rect, buf: &mut Buffer) {
-        // We get the info depending on the item's state.
-        let info = if let Some(i) = self.todo_list.state.selected() {
-            match self.todo_list.items[i].status {
-                Status::Completed => format!("✓ DONE: {}", self.todo_list.items[i].info),
-                Status::Todo => format!("☐ TODO: {}", self.todo_list.items[i].info),
-            }
-        } else {
-            "Nothing selected...".to_string()
-        };
-
-        // We show the list item's info under the list in this paragraph
-        let block = Block::new()
-            .title(Line::raw("TODO Info").centered())
-            .borders(Borders::TOP)
-            .border_set(symbols::border::EMPTY)
-            .border_style(TODO_HEADER_STYLE)
-            .bg(NORMAL_ROW_BG)
-            .padding(Padding::horizontal(1));
-
-        // We can now render the item info
-        Paragraph::new(info)
-            .block(block)
-            .fg(TEXT_FG_COLOR)
-            .wrap(Wrap { trim: false })
-            .render(area, buf);
-    }
-}
-
-const fn alternate_colors(i: usize) -> Color {
-    if i % 2 == 0 {
-        NORMAL_ROW_BG
-    } else {
-        ALT_ROW_BG_COLOR
-    }
-}
-
-impl From<&String> for ListItem<'_> {
-    fn from(value: &String) -> Self {
-        let line = match value.status {
-            Status::Todo => Line::styled(format!(" ☐ {}", value.todo), TEXT_FG_COLOR),
-            Status::Completed => {
-                Line::styled(format!(" ✓ {}", value.todo), COMPLETED_TEXT_FG_COLOR)
-            }
-        };
-        ListItem::new(line)
+        self.selection = self.selection.and_then(|t| if t != 0 { Some(t - 1) } else {Some(0)}).or(Some(0))
     }
 }
 
@@ -323,22 +283,13 @@ fn derive_key(password: &str, salt: &[u8]) -> [u8; 32] {
 }
 
 fn encrypt_with_password(plaintext: &str, password: &str) -> EncryptedText {
-    // Generate random salt
     let mut salt = [0u8; 16];
     OsRng.fill_bytes(&mut salt);
-
-    // Derive key
     let key = derive_key(password, &salt);
-
-    // Create cipher
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
-
-    // Generate random nonce
     let mut nonce = [0u8; 12];
     OsRng.fill_bytes(&mut nonce);
     let nonce_obj = Nonce::from_slice(&nonce);
-
-    // Encrypt
     let ciphertext = cipher.encrypt(nonce_obj, plaintext.as_bytes())
         .expect("Encryption failure");
 
@@ -368,21 +319,34 @@ struct PasswordManager {
 }
 
 impl PasswordManager {
-    pub fn load_from_file(path: String) -> Self {
+    pub fn load_from_file(path: &String) -> Self {
         bincode::deserialize(&*fs::read(path).unwrap()).unwrap()
     }
 
-    pub fn to_file(&self, path: String) {
+    pub fn to_file(&self, path: &String) {
         fs::write(path, bincode::serialize(self).unwrap()).expect("Failed to write");
     }
 
-    pub fn init(path: String) -> Self {
-        if fs::exists(&path).unwrap() { Self::load_from_file(path) }
+    pub fn init(path: &String) -> Self {
+        if fs::exists(path).unwrap() { Self::load_from_file(path) }
         else {
             let s = Self {passwords: HashMap::new(), username: whoami::username().unwrap()};
             s.to_file(path);
             s
         }
+    }
+
+    pub fn decrypt_all(&self, password: String) -> IndexMap<String, String> {
+        let mut hm = IndexMap::new();
+        for pw in self.passwords.iter() {
+            hm.insert(pw.0.to_owned(), decrypt_with_password(&password, pw.1));
+        }
+        hm
+    }
+
+    pub fn add_password(&mut self, password: String, name: String, value: &String) {
+        let enc = encrypt_with_password(&*value, &password);
+        self.passwords.insert(name, enc);
     }
 }
 
@@ -396,14 +360,7 @@ struct EncryptedText {
 fn main() -> Result<()> {
     color_eyre::install()?;
     let terminal = ratatui::init();
-    let app_result = App::default().run(terminal);
+    let app_result = App::new("katja".into()).run(terminal);
     ratatui::restore();
     app_result
 }
-
-
-// fn main() {
-//     let path = format!("/home/{}/.pwstg", whoami::username().unwrap());
-//     let pw_man = PasswordManager::init(path);
-// }
-//
