@@ -374,7 +374,6 @@ impl App {
     }
 
     fn handle_key_em_value(&mut self, key: KeyEvent) {
-        self.show_pwd = false;
         if key.kind != KeyEventKind::Press {
             return;
         }
