@@ -52,6 +52,7 @@ struct App {
     pw_file: String,
     changed: bool,
     error: ErrorDisplay,
+    show_pwd: bool,
 }
 
 fn popup_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -67,6 +68,7 @@ impl App {
         let pw_file = find_storage_location();
         let pw_man = PasswordManager::init(&pw_file);
         Self {
+            show_pwd: false,
             error: ErrorDisplay::None,
             changed: false,
             pw_file,
@@ -86,18 +88,21 @@ impl App {
         while !self.should_exit {
             match self.enter_mode {
                 EnterMode::None => {
+                    terminal.hide_cursor().expect("Failed to hide cursor");
                     terminal.draw(|frame| self.draw_em_none(frame))?;
                     if let Event::Key(key) = event::read()? {
                         self.handle_key_em_none(key);
                     }
                 }
                 EnterMode::Name => {
+                    terminal.show_cursor().expect("Failed to show cursor");
                     terminal.draw(|frame| self.draw_em_name(frame))?;
                     if let Event::Key(key) = event::read()? {
                         self.handle_key_em_name(key);
                     }
                 }
                 EnterMode::Value => {
+                    terminal.show_cursor().expect("Failed to show cursor");
                     terminal.draw(|frame| self.draw_em_value(frame))?;
                     if let Event::Key(key) = event::read()? {
                         self.handle_key_em_value(key);
@@ -107,14 +112,14 @@ impl App {
         }
         Ok(())
     }
-    
+
     fn draw_error(&self, frame: &mut Frame, area: Rect) {
         let text = match self.error {
             ErrorDisplay::None => return,
             ErrorDisplay::EmptyField => "This field may not be empty",
             ErrorDisplay::DuplicateName => "Password with the same name already exists"
         };
-        
+
         let paragraph = Paragraph::new(text.rapid_blink().red()).centered();
         frame.render_widget(paragraph, area);
     }
@@ -124,7 +129,7 @@ impl App {
 
         let [instructions, ed] = Layout::vertical([Constraint::Length(1), Constraint::Length(2)]).areas(area);
         self.draw_error(frame, ed);
-        
+
         let paragraph = Paragraph::new("Press ESC to go back".slow_blink())
             .centered()
             .wrap(Wrap { trim: true });
@@ -146,7 +151,7 @@ impl App {
             .wrap(Wrap { trim: true });
         frame.render_widget(paragraph, instructions);
         
-        let block = Paragraph::new("*".repeat(self.value_data.len())).block(Block::bordered().title("Enter Password"));
+        let block = Paragraph::new(if self.show_pwd { self.value_data.to_owned() } else { "*".repeat(self.value_data.len()) }).block(Block::bordered().title("Enter Password"));
         let area = popup_area(area, 60, 20);
         frame.render_widget(block, area);
     }
@@ -166,7 +171,7 @@ impl App {
             text = format!("{text} <unsaved changes>");
         }
         frame.render_widget(Paragraph::new(text).bold().centered(), header_area);
-        frame.render_widget(Paragraph::new("Use ↓↑ to move, + / a to add one, v to view / hide, c to copy password\ne to edit, r to remove, s to save, q to quit.").centered(), footer_area);
+        frame.render_widget(Paragraph::new("Use ↓↑ to move, + / a to add one, v to view / hide, TAB to show all\nc to copy password, e to edit, r to remove, s to save, ESC to unselect, q to quit.").centered(), footer_area);
 
         let block = Block::new()
             .title(Line::raw("Passwords").left_aligned())
@@ -192,7 +197,7 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, pw_name)| {
-                let pw = if self.viewing.contains(&(i as u32)) { pw_name.1.to_owned() } else { "*".repeat(pw_name.1.len()) };
+                let pw = if self.show_pwd || self.viewing.contains(&(i as u32)) { pw_name.1.to_owned() } else { "*".repeat(pw_name.1.len()) };
                 if self.selection.is_some_and(|x| {x==i as u32}) {
                     ListItem::new(Line::styled(pw, Style::from(Color::Cyan)))
                 } else {
@@ -218,12 +223,15 @@ impl App {
     }
 
     fn handle_key_em_none(&mut self, key: KeyEvent) {
+        self.show_pwd = false;
         if key.kind != KeyEventKind::Press {
             return;
         }
+        
         match key.code {
             KeyCode::Char('+') | KeyCode::Char('a') => self.enter_mode = EnterMode::Name,
-            KeyCode::Char('q') | KeyCode::Esc => self.should_exit = true,
+            KeyCode::Char('q') => self.should_exit = true,
+            KeyCode::Esc => self.select_none(),
             KeyCode::Char('h') | KeyCode::Left => self.select_none(),
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_previous(),
@@ -231,6 +239,9 @@ impl App {
                 self.password_manager.to_file(&self.pw_file);
                 self.changed = false;
             },
+            KeyCode::Tab => {
+                self.show_pwd = true
+            }
             KeyCode::Char('v') if self.selection.is_some() => {
                 let i = self.selection.unwrap();
                 if let Some(index) = self.viewing.iter().position(|value| *value == i) {
@@ -265,12 +276,13 @@ impl App {
     }
 
     fn handle_key_em_name(&mut self, key: KeyEvent) {
+        self.show_pwd = false;
         if key.kind != KeyEventKind::Press {
             return;
         }
         
         match key.code {
-            KeyCode::Esc => { 
+            KeyCode::Esc => {
                 self.name_data = String::new();
                 self.enter_mode = EnterMode::None
             },
@@ -293,6 +305,7 @@ impl App {
     }
 
     fn handle_key_em_value(&mut self, key: KeyEvent) {
+        self.show_pwd = false;
         if key.kind != KeyEventKind::Press {
             return;
         }
@@ -302,8 +315,11 @@ impl App {
             KeyCode::Backspace => {
                 self.value_data.pop();
             }
+            KeyCode::Tab => {
+                self.show_pwd = true
+            }
             KeyCode::Char(c) => {
-                self.value_data.push(c);
+                self.value_data.push(c)
             }
             KeyCode::Enter => {
                 if self.value_data.is_empty() { self.error = ErrorDisplay::EmptyField }
@@ -311,7 +327,7 @@ impl App {
                     self.error = ErrorDisplay::None;
                     self.enter_mode = EnterMode::None
                 }
-                self.add_password();
+                self.add_password()
             }
             _ => {}
         }
