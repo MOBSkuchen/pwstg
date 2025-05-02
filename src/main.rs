@@ -229,7 +229,7 @@ impl App {
         self.draw_error(frame, ed);
 
         let [left, right] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(main);
-        let mut text = format!("pwstg - Password Storage by MOBSkuchen\nPasswords for {} are at: {}\n", self.pw_context.password_manager.username, self.pw_context.pw_file);
+        let mut text = format!("pwstg - Password Storage by MOBSkuchen\nPasswords for {} are at: {}", self.pw_context.password_manager.username, self.pw_context.pw_file);
         if self.changed {
             text = format!("{text} <unsaved changes>");
         }
@@ -470,11 +470,11 @@ fn decrypt_with_password(password: &str, encrypted_text: &EncryptedText) -> Resu
 struct PwEntry ((EncryptedText, EncryptedText));
 
 impl PwEntry {
-    pub fn decrypt(&self, key: &String) -> Result<(String, String), Error> {
-        Ok((decrypt_with_password(&key, &self.0.0)?, decrypt_with_password(&key, &self.0.0)?))
+    pub fn decrypt(&self, key: &str) -> Result<(String, String), Error> {
+        Ok((decrypt_with_password(key, &self.0.0)?, decrypt_with_password(key, &self.0.0)?))
     }
     
-    pub fn encrypt(key: &String, item: (&String, &String)) -> Self {
+    pub fn encrypt(key: &str, item: (&String, &String)) -> Self {
         Self((encrypt_with_password(item.0.as_str(), key), encrypt_with_password(item.1.as_str(), key)))
     }
 }
@@ -492,7 +492,7 @@ struct PasswordHolderInterface {
 }
 
 impl PasswordHolderInterface {
-    pub fn init(path: &String, key: &String) -> Result<Self, Error> {
+    pub fn init(path: &String, key: &str) -> Result<Self, Error> {
         Self::from_enc(PasswordStorageHolder::init(path)?, key)
     }
 
@@ -500,21 +500,21 @@ impl PasswordHolderInterface {
         self.passwords.insert(name, value);
     }
 
-    pub fn save(&self, path: &String, key: &String) -> Result<(), Error> {
+    pub fn save(&self, path: &String, key: &str) -> Result<(), Error> {
         self.to_enc(key)?.to_file(path)
     }
     
-    pub fn from_enc(pw_stg_hld: PasswordStorageHolder, key: &String) -> Result<Self, Error> {
+    pub fn from_enc(pw_stg_hld: PasswordStorageHolder, key: &str) -> Result<Self, Error> {
         let mut passwords: IndexMap<String, String> = IndexMap::new();
         for entry in pw_stg_hld.passwords {
-            let dec = entry.decrypt(&key)?;
+            let dec = entry.decrypt(key)?;
             passwords.insert(dec.0, dec.1);
         }
         Ok(Self { passwords, username: pw_stg_hld.username })
     }
 
-    pub fn to_enc(&self, key: &String) -> Result<PasswordStorageHolder, Error> {
-        let passwords = Vec::from_iter(self.passwords.iter().map(|x| {PwEntry::encrypt(&key, x)}));
+    pub fn to_enc(&self, key: &str) -> Result<PasswordStorageHolder, Error> {
+        let passwords = Vec::from_iter(self.passwords.iter().map(|x| {PwEntry::encrypt(key, x)}));
         Ok(PasswordStorageHolder { passwords, username: self.username.clone() })
     }
 }
