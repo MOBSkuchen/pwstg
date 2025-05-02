@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use indexmap::IndexMap;
 use std::{fs, io};
 use std::io::Write;
@@ -17,7 +16,7 @@ use arboard::Clipboard;
 use clap::Arg;
 use clap::ValueHint::AnyPath;
 use rpassword::read_password;
-use crate::Error::{InaccessibleClipboard, Other, RemovalFailed, WrongPassword, StorageFileNotFound};
+use crate::Error::{InaccessibleClipboard, Other, RemovalFailed, WrongPassword, StorageFileNotFound, StorageFileFormat};
 
 pub const NAME: &str = env!("CARGO_PKG_NAME");
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -29,7 +28,9 @@ enum Error {
     InaccessibleClipboard,
     WrongPassword,
     StorageFileNotFound(String),
+    StorageFileFormat(String),
     Other(io::Error),
+    WriteFailed
 }
 
 fn find_storage_location() -> String {
@@ -54,24 +55,20 @@ enum ErrorDisplay {
     None,
     EmptyField,
     DuplicateName,
+    Failed2Write
 }
 
 struct PasswordContext {
-    password_manager: PasswordStorageHolder,
-    passwords: IndexMap<String, String>,
-    password: String,
-    pw_file: String
+    password_manager: PasswordHolderInterface,
+    pw_file: String,
+    password: String
 }
 
 impl PasswordContext {
-    pub fn new(password_manager: PasswordStorageHolder, passwords: IndexMap<String, String>, password: String, pw_file: String) -> Self {
-        Self { password_manager, passwords, password, pw_file }
-    }
     
     pub fn auto(password: String, pw_file: String) -> Result<Self, Error> {
-        let pw_man = PasswordStorageHolder::init(&pw_file)?;
-        let passwords = pw_man.decrypt_all(password.clone())?;
-        Ok(Self::new(pw_man, passwords, password, pw_file))
+        let password_manager = PasswordHolderInterface::init(&pw_file, &password)?;
+        Ok(Self {password_manager, pw_file, password})
     }
 }
 
@@ -149,7 +146,9 @@ impl App {
                     terminal.hide_cursor().expect("Failed to hide cursor");
                     terminal.draw(|frame| self.draw_em_none(frame))?;
                     if let Event::Key(key) = event::read()? {
-                        self.handle_key_em_none(key);
+                        if self.handle_key_em_none(key).is_err() {
+                            self.error = ErrorDisplay::Failed2Write // Only error that can come from here
+                        }
                     }
                 }
                 EnterMode::Name => {
@@ -177,7 +176,8 @@ impl App {
         let text = match self.error {
             ErrorDisplay::None => return,
             ErrorDisplay::EmptyField => "This field may not be empty",
-            ErrorDisplay::DuplicateName => "Password with the same name already exists"
+            ErrorDisplay::DuplicateName => "Password with the same name already exists",
+            ErrorDisplay::Failed2Write => "Failed to write passwords"
         };
 
         let paragraph = Paragraph::new(text.rapid_blink().red()).centered();
@@ -218,12 +218,15 @@ impl App {
 
     fn draw_em_none(&self, frame: &mut Frame) {
         let area = frame.area();
-        let [header_area, top, main, footer_area] = Layout::vertical([
+        let [header_area, ed, top, main, footer_area] = Layout::vertical([
             Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Length(2),
             Constraint::Fill(1),
             Constraint::Length(2),
         ]).areas(area);
+
+        self.draw_error(frame, ed);
 
         let [left, right] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(main);
         let mut text = format!("pwstg - Password Storage by MOBSkuchen\nPasswords for {} are at: {}\n", self.pw_context.password_manager.username, self.pw_context.pw_file);
@@ -243,8 +246,8 @@ impl App {
 
         frame.render_widget(block, top);
 
-        let pw_it_1 = selection_window(self.pw_context.passwords.keys(), i, x);
-        let pw_it_2 = selection_window(self.pw_context.passwords.iter(), i, x);
+        let pw_it_1 = selection_window(self.pw_context.password_manager.passwords.keys(), i, x);
+        let pw_it_2 = selection_window(self.pw_context.password_manager.passwords.iter(), i, x);
 
         let items: Vec<ListItem> = pw_it_1.iter()
             .enumerate()
@@ -283,13 +286,12 @@ impl App {
         self.name_data = String::new();
         self.value_data = String::new();
 
-        self.pw_context.password_manager.add_password(self.pw_context.password.clone(), name.clone(), &value);
-        self.pw_context.passwords.insert(name, value);
+        self.pw_context.password_manager.add_password(name, value);
     }
 
-    fn handle_key_em_none(&mut self, key: KeyEvent) {
+    fn handle_key_em_none(&mut self, key: KeyEvent) -> Result<(), Error> {
         if key.kind != KeyEventKind::Press {
-            return;
+            return Ok(());
         }
 
         match key.code {
@@ -300,7 +302,7 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_previous(),
             KeyCode::Char('s') => {
-                self.pw_context.password_manager.to_file(&self.pw_context.pw_file);
+                self.pw_context.password_manager.save(&self.pw_context.pw_file, &self.pw_context.password)?;
                 self.changed = false;
             },
             KeyCode::Tab => {
@@ -316,28 +318,26 @@ impl App {
             },
             KeyCode::Char('e') if self.selection.is_some() => {
                 self.ctx_edit = true;
-                let val = self.pw_context.passwords.get_index(self.selection.unwrap() as usize).unwrap();
+                let val = self.pw_context.password_manager.passwords.get_index(self.selection.unwrap() as usize).unwrap();
 
                 self.name_data = val.0.to_string();
                 self.value_data = val.1.to_string();
                 self.enter_mode = EnterMode::Name;
 
-                self.pw_context.password_manager.passwords.remove(&self.name_data);
-                self.pw_context.passwords.swap_remove_index(self.selection.unwrap() as usize);
+                self.pw_context.password_manager.passwords.swap_remove_index(self.selection.unwrap() as usize);
                 self.changed = true;
             },
             KeyCode::Char('c') if self.selection.is_some() => {
-                let val = self.pw_context.passwords.get_index(self.selection.unwrap() as usize).unwrap();
+                let val = self.pw_context.password_manager.passwords.get_index(self.selection.unwrap() as usize).unwrap();
                 copy_to_clipboard(val.1).expect("Failed to copy to clipboard");
             },
             KeyCode::Char('r') if self.selection.is_some() => {
-                let val = self.pw_context.passwords.get_index(self.selection.unwrap() as usize).unwrap();
-                self.pw_context.password_manager.passwords.remove(val.0);
-                self.pw_context.passwords.swap_remove_index(self.selection.unwrap() as usize);
+                self.pw_context.password_manager.passwords.swap_remove_index(self.selection.unwrap() as usize);
                 self.changed = true;
             },
             _ => {}
         }
+        Ok(())
     }
 
     fn handle_key_em_name(&mut self, key: KeyEvent) {
@@ -361,7 +361,7 @@ impl App {
             }
             KeyCode::Enter => {
                 if self.name_data.is_empty() { self.error = ErrorDisplay::EmptyField }
-                else if self.pw_context.passwords.contains_key(&self.name_data) { self.error = ErrorDisplay::DuplicateName }
+                else if self.pw_context.password_manager.passwords.contains_key(&self.name_data) { self.error = ErrorDisplay::DuplicateName }
                 else {
                     self.error = ErrorDisplay::None;
                     self.enter_mode = EnterMode::Value
@@ -404,12 +404,12 @@ impl App {
     }
 
     fn select_next(&mut self) {
-        if self.pw_context.passwords.is_empty() {
+        if self.pw_context.password_manager.passwords.is_empty() {
             self.selection = None;
             return;
         }
 
-        let max_index = self.pw_context.passwords.len() - 1;
+        let max_index = self.pw_context.password_manager.passwords.len() - 1;
         self.selection = Some(match self.selection {
             Some(i) if i < max_index as u32 => i + 1,
             _ => max_index as u32,
@@ -417,7 +417,7 @@ impl App {
     }
 
     fn select_previous(&mut self) {
-        if self.pw_context.passwords.is_empty() {
+        if self.pw_context.password_manager.passwords.is_empty() {
             self.selection = None;
             return;
         }
@@ -466,42 +466,75 @@ fn decrypt_with_password(password: &str, encrypted_text: &EncryptedText) -> Resu
     Ok(String::from_utf8(decrypted_bytes?).expect("Invalid UTF-8"))
 }
 
+#[derive(Serialize, Deserialize)]
+struct PwEntry ((EncryptedText, EncryptedText));
+
+impl PwEntry {
+    pub fn decrypt(&self, key: &String) -> Result<(String, String), Error> {
+        Ok((decrypt_with_password(&key, &self.0.0)?, decrypt_with_password(&key, &self.0.0)?))
+    }
+    
+    pub fn encrypt(key: &String, item: (&String, &String)) -> Self {
+        Self((encrypt_with_password(item.0.as_str(), key), encrypt_with_password(item.1.as_str(), key)))
+    }
+}
+
 
 #[derive(Serialize, Deserialize)]
 struct PasswordStorageHolder {
-    passwords: HashMap<String, EncryptedText>,
+    passwords: Vec<PwEntry>,
     username: String,
+}
+
+struct PasswordHolderInterface {
+    pub passwords: IndexMap<String, String>,
+    pub username: String,
+}
+
+impl PasswordHolderInterface {
+    pub fn init(path: &String, key: &String) -> Result<Self, Error> {
+        Self::from_enc(PasswordStorageHolder::init(path)?, key)
+    }
+
+    pub fn add_password(&mut self, name: String, value: String) {
+        self.passwords.insert(name, value);
+    }
+
+    pub fn save(&self, path: &String, key: &String) -> Result<(), Error> {
+        self.to_enc(key)?.to_file(path)
+    }
+    
+    pub fn from_enc(pw_stg_hld: PasswordStorageHolder, key: &String) -> Result<Self, Error> {
+        let mut passwords: IndexMap<String, String> = IndexMap::new();
+        for entry in pw_stg_hld.passwords {
+            let dec = entry.decrypt(&key)?;
+            passwords.insert(dec.0, dec.1);
+        }
+        Ok(Self { passwords, username: pw_stg_hld.username })
+    }
+
+    pub fn to_enc(&self, key: &String) -> Result<PasswordStorageHolder, Error> {
+        let passwords = Vec::from_iter(self.passwords.iter().map(|x| {PwEntry::encrypt(&key, x)}));
+        Ok(PasswordStorageHolder { passwords, username: self.username.clone() })
+    }
 }
 
 impl PasswordStorageHolder {
     pub fn load_from_file(path: &String) -> Result<Self, Error> {
-        bincode::deserialize(&fs::read(path).map_err(|_| {StorageFileNotFound(path.to_owned())})?).map_err(|_| {StorageFileNotFound(path.to_owned())})
+        bincode::deserialize(&fs::read(path).map_err(|_| {StorageFileNotFound(path.to_owned())})?).map_err(|_| {StorageFileFormat(path.to_owned())})
     }
 
-    pub fn to_file(&self, path: &String) {
-        fs::write(path, bincode::serialize(self).unwrap()).expect("Failed to write");
+    pub fn to_file(&self, path: &String) -> Result<(), Error> {
+        fs::write(path, bincode::serialize(self).unwrap()).map_err(|_| {Error::WriteFailed})
     }
 
     pub fn init(path: &String) -> Result<Self, Error> {
         if fs::exists(path).unwrap() { Self::load_from_file(path) }
         else {
-            let s = Self {passwords: HashMap::new(), username: whoami::username().unwrap()};
-            s.to_file(path);
+            let s = Self {passwords: vec![], username: whoami::username().unwrap()};
+            s.to_file(path)?;
             Ok(s)
         }
-    }
-
-    pub fn decrypt_all(&self, password: String) -> Result<IndexMap<String, String>, Error> {
-        let mut hm = IndexMap::new();
-        for pw in self.passwords.iter() {
-            hm.insert(pw.0.to_owned(), decrypt_with_password(&password, pw.1)?);
-        }
-        Ok(hm)
-    }
-
-    pub fn add_password(&mut self, password: String, name: String, value: &str) {
-        let enc = encrypt_with_password(value, &password);
-        self.passwords.insert(name, enc);
     }
 }
 
@@ -544,7 +577,7 @@ fn create_pw_context(matches: &clap::ArgMatches) -> Result<PasswordContext, Erro
 }
 
 fn get_main(ctx: PasswordContext, password: &String, mask: bool, copy: bool) -> Result<(), Error> {
-    match ctx.passwords.get(password) {
+    match ctx.password_manager.passwords.get(password) {
         None => {
             println!("The password `{password}` was not found");
         }
@@ -558,7 +591,7 @@ fn get_main(ctx: PasswordContext, password: &String, mask: bool, copy: bool) -> 
 }
 
 fn list_main(ctx: PasswordContext) -> Result<(), Error> {
-    for password in ctx.passwords {
+    for password in ctx.password_manager.passwords {
         println!("Password: `{}` => {}", password.0, "*".repeat(password.1.len()));
     }
     Ok(())
@@ -635,21 +668,22 @@ fn main() {
     let result = main2();
     if let Err(e) = result {
         match e {
-            RemovalFailed => {
-                println!("Failed to remove the default storage");
+            RemovalFailed =>
+                println!("Failed to remove the default storage"),
+            InaccessibleClipboard =>
+                println!("Could not access your clipboard"),
+            WrongPassword =>
+                println!("The given password was wrong"),
+            StorageFileNotFound(loc) =>
+                println!("The storage file was not found at {loc}"),
+            StorageFileFormat(loc) => {
+                println!("The storage file could not be opened at {loc}, because it isn't in the right format");
+                println!("It might have been externally modified or created in a previous version of pwstg (before {VERSION})");
+                println!("You can use `--stg <path>` to set the storage location to somewhere else");
+                println!("Or use `--regenerate-stg` to remove the file")
             }
-            InaccessibleClipboard => {
-                println!("Could not access your clipboard");
-            }
-            WrongPassword => {
-                println!("The given password was wrong")
-            }
-            StorageFileNotFound(loc) => {
-                println!("The storage file was not found (or could not be opened) at {loc}");
-            }
-            Other(o) => {
-                println!("System error: {}", o);
-            }
+            Other(o) => println!("System error: {}", o),
+            Error::WriteFailed => println!("Failed to write password storage file!"),
         }
     }
 }
