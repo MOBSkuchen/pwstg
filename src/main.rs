@@ -226,7 +226,7 @@ impl App {
         ]).areas(area);
 
         let [left, right] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(main);
-        let mut text = format!("pwstg - Password Storage by MOBSkuchen\nPasswords are at: {}", self.pw_context.pw_file);
+        let mut text = format!("pwstg - Password Storage by MOBSkuchen\nPasswords for {} are at: {}\n", self.pw_context.password_manager.username, self.pw_context.pw_file);
         if self.changed {
             text = format!("{text} <unsaved changes>");
         }
