@@ -471,7 +471,7 @@ struct PwEntry ((EncryptedText, EncryptedText));
 
 impl PwEntry {
     pub fn decrypt(&self, key: &str) -> Result<(String, String), Error> {
-        Ok((decrypt_with_password(key, &self.0.0)?, decrypt_with_password(key, &self.0.0)?))
+        Ok((decrypt_with_password(key, &self.0.0)?, decrypt_with_password(key, &self.0.1)?))
     }
     
     pub fn encrypt(key: &str, item: (&String, &String)) -> Self {
