@@ -549,6 +549,8 @@ fn prompt_password(loc: &String) -> io::Result<String> {
     print!("Enter password to read password-storage at {}\n> ", loc);
     io::stdout().flush()?;
     let password = read_password()?;
+    //  MOVE 2 UP  CLEAR LINE
+    print!("\x1B[2A\x1B[K");
     Ok(password)
 }
 
@@ -677,8 +679,9 @@ fn main() {
             StorageFileNotFound(loc) =>
                 println!("The storage file was not found at {loc}"),
             StorageFileFormat(loc) => {
-                println!("The storage file could not be opened at {loc}, because it isn't in the right format");
+                println!("The storage file could not be read at {loc}, because it isn't in the right format");
                 println!("It might have been externally modified or created in a previous version of pwstg (before {VERSION})");
+                println!("Notably, before a breaking change at V0.3.0");
                 println!("You can use `--stg <path>` to set the storage location to somewhere else");
                 println!("Or use `--regenerate-stg` to remove the file")
             }
