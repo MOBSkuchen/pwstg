@@ -604,6 +604,13 @@ fn main2() -> Result<(), Error> {
         .about(DESCRIPTION)
         .version(VERSION)
         .disable_version_flag(true)
+        .after_help("Technical info:\n  1. When initializing a new storage, \
+        the password will only be set once the passwords are saved.\n     \
+        Merely creating it does not affirm the password, because the file stays empty.\n  \
+        2. While the program is running, all requested* passwords are being stored unencrypted in memory.\n     \
+        (*) requested means the passwords that are being displayed,\n     \
+        for example running in TUI mode uses all passwords, while get only uses one.\n  \
+        3. Masked passwords length correspond to their real length. ")
         .arg(Arg::new("stg")
             .long("stg")
             .short('s')
